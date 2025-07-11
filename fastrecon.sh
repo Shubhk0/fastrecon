@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Bug Bounty Automation Script (Comprehensive with Auto-Wordlist Download)
+# Bug Bounty Automation Script (Comprehensive with Auto-Wordlist Download & Custom Header)
 #
 # This script automates highly automatable tasks for web application bug bounties,
 # focusing on comprehensive reconnaissance and initial vulnerability scanning.
@@ -11,6 +11,7 @@
 # - Always review the output manually.
 # - Configure wordlist paths and adjust concurrency/rate limits carefully.
 # - Wordlists will be automatically downloaded if not found at specified paths.
+# - A custom HTTP header will be added to requests where applicable.
 #
 # Usage: ./bug_bounty_automation.sh -d <target_domain> [options]
 # Example: ./bug_bounty_automation.sh -d example.com -p http://127.0.0.1:8080 -v
@@ -30,6 +31,9 @@ WORDLISTS_DIR="${HOME}/.bugbounty_wordlists" # Directory where wordlists will be
 PROXY_ADDRESS="" # Optional: http://127.0.0.1:8080 for Burp Suite
 VERBOSE=0 # Set to 1 for verbose output during execution
 SKIP_CLEANUP=0 # Set to 1 to keep intermediate files for debugging
+
+# Custom Research Header for tracking (applied where possible)
+CUSTOM_HEADER="X-HackerOne-Research: [H1 shubhk9630]"
 
 # Concurrency & Rate Limiting (Adjust these carefully for stealth and target robustness)
 SUBFINDER_THREADS=10
@@ -167,6 +171,7 @@ run_httpx_probe() {
 
     httpx_cmd="cat \"$input_file\" | httpx -silent -threads \"$HTTPX_CONCURRENCY\" -o \"$output_file\""
     [ "$PROXY_ADDRESS" != "" ] && httpx_cmd="$httpx_cmd -x \"$PROXY_ADDRESS\"" # httpx uses -x for proxy
+    [ -n "$CUSTOM_HEADER" ] && httpx_cmd="$httpx_cmd -H \"$CUSTOM_HEADER\"" # Add custom header
     [ "$VERBOSE" -eq 1 ] && log_message "INFO" "  Executing: $httpx_cmd"
     eval "$httpx_cmd"
 
@@ -187,13 +192,14 @@ run_passive_url_collection() {
     log_message "INFO" "  Running gau with $GAU_CONCURRENCY concurrency and $GAU_RESOLVE_TIMEOUTs timeout."
     gau_cmd="cat \"$input_file\" | gau --threads \"$GAU_CONCURRENCY\" --resolve-timeout \"$GAU_RESOLVE_TIMEOUT\" --blacklist png,jpg,gif,svg,css,ttf,woff,woff2,eot,json,xml,js,webp --json"
     [ "$PROXY_ADDRESS" != "" ] && gau_cmd="$gau_cmd --proxy \"$PROXY_ADDRESS\""
+    [ -n "$CUSTOM_HEADER" ] && gau_cmd="$gau_cmd --headers \"$CUSTOM_HEADER\"" # Add custom header
     [ "$VERBOSE" -eq 1 ] && log_message "INFO" "  Executing gau: $gau_cmd | jq -r '.url' > \"$gau_output_file\""
     eval "$gau_cmd" | jq -r '.url' > "$gau_output_file"
     if [ $? -ne 0 ]; then log_message "WARN" "gau failed or produced no output."; touch "$gau_output_file"; fi
     log_message "INFO" "  Collected $(wc -l < "$gau_output_file") URLs from gau."
 
-    # Run waybackurls
-    log_message "INFO" "  Running waybackurls with $WAYBACKURLS_CONCURRENCY concurrency."
+    # Run waybackurls (Note: Custom headers are not applicable here as it queries archive.org)
+    log_message "INFO" "  Running waybackurls with $WAYBACKURLS_CONCURRENCY concurrency. (Custom header NOT applied - targets archive.org)"
     waybackurls_cmd="cat \"$input_file\" | waybackurls -c \"$WAYBACKURLS_CONCURRENCY\" | grep -vE '\.(js|css|png|jpg|jpeg|gif|svg|ico|woff|woff2|ttf|eot|pdf|zip|rar|7z|gz|xml|json)$'"
     [ "$VERBOSE" -eq 1 ] && log_message "INFO" "  Executing waybackurls: $waybackurls_cmd > \"$waybackurls_output_file\""
     eval "$waybackurls_cmd" > "$waybackurls_output_file"
@@ -209,6 +215,7 @@ run_katana_discovery() {
 
     katana_cmd="cat \"$input_file\" | katana -d \"$KATANA_DEPTH\" -t \"$KATANA_THREADS\" -rl \"$KATANA_RATE\" -o \"$output_file\" -silent -jc" # -jc for JS crawling
     [ "$PROXY_ADDRESS" != "" ] && katana_cmd="$katana_cmd -proxy \"$PROXY_ADDRESS\""
+    [ -n "$CUSTOM_HEADER" ] && katana_cmd="$katana_cmd -H \"$CUSTOM_HEADER\"" # Add custom header
     
     [ "$VERBOSE" -eq 1 ] && log_message "INFO" "  Executing: $katana_cmd"
     eval "$katana_cmd"
@@ -241,6 +248,7 @@ run_ffuf_bruteforce() {
         local ffuf_paths_cmd="ffuf -u \"$host/FUZZ\" -w \"$WORDLIST_COMMON_PATHS\" -of csv -o \"$output_dir/${sanitized_host}_paths.csv\" \
          -t \"$FFUF_THREADS\" -rate \"$FFUF_RATE\" -c -sf -sa -delay \"$current_ffuf_delay_ms\""
         [ "$PROXY_ADDRESS" != "" ] && ffuf_paths_cmd="$ffuf_paths_cmd -x \"$PROXY_ADDRESS\""
+        [ -n "$CUSTOM_HEADER" ] && ffuf_paths_cmd="$ffuf_paths_cmd -H \"$CUSTOM_HEADER\"" # Add custom header
         [ "$VERBOSE" -eq 1 ] && log_message "INFO" "      Executing (paths): $ffuf_paths_cmd"
         eval "$ffuf_paths_cmd" & # Run in background
 
@@ -248,6 +256,7 @@ run_ffuf_bruteforce() {
         local ffuf_files_cmd="ffuf -u \"$host/FUZZ\" -w \"$WORDLIST_COMMON_FILES\" -of csv -o \"$output_dir/${sanitized_host}_files.csv\" \
          -t \"$FFUF_THREADS\" -rate \"$FFUF_RATE\" -c -sf -sa -delay \"$current_ffuf_delay_ms\""
         [ "$PROXY_ADDRESS" != "" ] && ffuf_files_cmd="$ffuf_files_cmd -x \"$PROXY_ADDRESS\""
+        [ -n "$CUSTOM_HEADER" ] && ffuf_files_cmd="$ffuf_files_cmd -H \"$CUSTOM_HEADER\"" # Add custom header
         [ "$VERBOSE" -eq 1 ] && log_message "INFO" "      Executing (files): $ffuf_files_cmd"
         eval "$ffuf_files_cmd" & # Run in background
     done < "$input_file"
@@ -269,6 +278,7 @@ run_nuclei_scan() {
     nuclei_cmd="nuclei -l \"$input_file\" -t vulnerabilities/ -t exposures/ -t misconfiguration/ -t default-logins/ -t cve/ \
                 -c \"$NUCLEI_CONCURRENCY\" -rl \"$NUCLEI_RATE\" -d \"$random_delay_s\" -silent -json -o \"$output_file\""
     [ "$PROXY_ADDRESS" != "" ] && nuclei_cmd="$nuclei_cmd -proxy \"$PROXY_ADDRESS\""
+    [ -n "$CUSTOM_HEADER" ] && nuclei_cmd="$nuclei_cmd -H \"$CUSTOM_HEADER\"" # Add custom header
     
     [ "$VERBOSE" -eq 1 ] && log_message "INFO" "  Executing: $nuclei_cmd"
     eval "$nuclei_cmd"
@@ -290,6 +300,7 @@ run_dalfox_scan() {
     # Using 'grep -E' for basic parameter detection to focus dalfox on relevant URLs
     dalfox_cmd="cat \"$input_file\" | grep -E '\?|=' | dalfox url --skip-grepping -w \"$DALFOX_THREADS\" -d \"$random_delay_s\" -o \"$output_file\""
     [ "$PROXY_ADDRESS" != "" ] && dalfox_cmd="$dalfox_cmd -x \"$PROXY_ADDRESS\"" # DalFox uses -x for proxy
+    [ -n "$CUSTOM_HEADER" ] && dalfox_cmd="$dalfox_cmd -H \"$CUSTOM_HEADER\"" # Add custom header
     
     [ "$VERBOSE" -eq 1 ] && log_message "INFO" "  Executing: $dalfox_cmd"
     eval "$dalfox_cmd"
@@ -304,6 +315,10 @@ run_subzy_scan() {
     local input_file="$1"
     local output_file="$2"
     log_message "INFO" "Performing Subdomain Takeover Check with Subzy..."
+    # Subzy does not have a direct option to add custom HTTP headers as of its common versions,
+    # and its core function is DNS resolution and specific fingerprinting, not general HTTP requests.
+    # Therefore, the custom header is NOT applied to Subzy.
+    log_message "INFO" "  (Custom header NOT applied to Subzy - not supported or applicable for its function)"
     subzy_cmd="subzy -targets \"$input_file\" --hide_fails --output \"$output_file\""
     
     [ "$VERBOSE" -eq 1 ] && log_message "INFO" "  Executing: $subzy_cmd"
