@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Bug Bounty Automation Script (Comprehensive with Auto-Wordlist Download & Custom Header)
+# Bug Bounty Automation Script (Comprehensive with Auto-Wordlist Download & ParamSpider)
 #
 # This script automates highly automatable tasks for web application bug bounties,
 # focusing on comprehensive reconnaissance and initial vulnerability scanning.
@@ -11,7 +11,6 @@
 # - Always review the output manually.
 # - Configure wordlist paths and adjust concurrency/rate limits carefully.
 # - Wordlists will be automatically downloaded if not found at specified paths.
-# - A custom HTTP header will be added to requests where applicable.
 #
 # Usage: ./bug_bounty_automation.sh -d <target_domain> [options]
 # Example: ./bug_bounty_automation.sh -d example.com -p http://127.0.0.1:8080 -v
@@ -32,8 +31,9 @@ PROXY_ADDRESS="" # Optional: http://127.0.0.1:8080 for Burp Suite
 VERBOSE=0 # Set to 1 for verbose output during execution
 SKIP_CLEANUP=0 # Set to 1 to keep intermediate files for debugging
 
-# Custom Research Header for tracking (applied where possible)
-CUSTOM_HEADER="X-HackerOne-Research: [H1 shubhk9630]"
+# Custom Research Header for tracking (REMOVED - previously "X-HackerOne-Research: [H1 shubhk9630]")
+# This variable is now empty, ensuring no custom header is added.
+CUSTOM_HEADER=""
 
 # Concurrency & Rate Limiting (Adjust these carefully for stealth and target robustness)
 SUBFINDER_THREADS=10
@@ -171,7 +171,7 @@ run_httpx_probe() {
 
     httpx_cmd="cat \"$input_file\" | httpx -silent -threads \"$HTTPX_CONCURRENCY\" -o \"$output_file\""
     [ "$PROXY_ADDRESS" != "" ] && httpx_cmd="$httpx_cmd -x \"$PROXY_ADDRESS\"" # httpx uses -x for proxy
-    [ -n "$CUSTOM_HEADER" ] && httpx_cmd="$httpx_cmd -H \"$CUSTOM_HEADER\"" # Add custom header
+    # [ -n "$CUSTOM_HEADER" ] && httpx_cmd="$httpx_cmd -H \"$CUSTOM_HEADER\"" # Custom header removed
     [ "$VERBOSE" -eq 1 ] && log_message "INFO" "  Executing: $httpx_cmd"
     eval "$httpx_cmd"
 
@@ -192,7 +192,7 @@ run_passive_url_collection() {
     log_message "INFO" "  Running gau with $GAU_CONCURRENCY concurrency and $GAU_RESOLVE_TIMEOUTs timeout."
     gau_cmd="cat \"$input_file\" | gau --threads \"$GAU_CONCURRENCY\" --resolve-timeout \"$GAU_RESOLVE_TIMEOUT\" --blacklist png,jpg,gif,svg,css,ttf,woff,woff2,eot,json,xml,js,webp --json"
     [ "$PROXY_ADDRESS" != "" ] && gau_cmd="$gau_cmd --proxy \"$PROXY_ADDRESS\""
-    [ -n "$CUSTOM_HEADER" ] && gau_cmd="$gau_cmd --headers \"$CUSTOM_HEADER\"" # Add custom header
+    # [ -n "$CUSTOM_HEADER" ] && gau_cmd="$gau_cmd --headers \"$CUSTOM_HEADER\"" # Custom header removed
     [ "$VERBOSE" -eq 1 ] && log_message "INFO" "  Executing gau: $gau_cmd | jq -r '.url' > \"$gau_output_file\""
     eval "$gau_cmd" | jq -r '.url' > "$gau_output_file"
     if [ $? -ne 0 ]; then log_message "WARN" "gau failed or produced no output."; touch "$gau_output_file"; fi
@@ -215,7 +215,7 @@ run_katana_discovery() {
 
     katana_cmd="cat \"$input_file\" | katana -d \"$KATANA_DEPTH\" -t \"$KATANA_THREADS\" -rl \"$KATANA_RATE\" -o \"$output_file\" -silent -jc" # -jc for JS crawling
     [ "$PROXY_ADDRESS" != "" ] && katana_cmd="$katana_cmd -proxy \"$PROXY_ADDRESS\""
-    [ -n "$CUSTOM_HEADER" ] && katana_cmd="$katana_cmd -H \"$CUSTOM_HEADER\"" # Add custom header
+    # [ -n "$CUSTOM_HEADER" ] && katana_cmd="$katana_cmd -H \"$CUSTOM_HEADER\"" # Custom header removed
     
     [ "$VERBOSE" -eq 1 ] && log_message "INFO" "  Executing: $katana_cmd"
     eval "$katana_cmd"
@@ -225,6 +225,53 @@ run_katana_discovery() {
         touch "$output_file"
     fi
     log_message "INFO" "  Found $(wc -l < "$output_file") URLs with Katana."
+}
+
+run_paramspider_discovery() {
+    local input_file="$1" # Live hosts file
+    local output_file="$2" # Aggregate output for paramspider
+
+    log_message "INFO" "Performing Parameter Discovery with ParamSpider..."
+    log_message "INFO" "  Running ParamSpider for each live host to discover parameterized URLs."
+    
+    # Create a temporary directory for per-host paramspider outputs
+    local temp_paramspider_dir="$REPORTS_DIR/paramspider_temp"
+    mkdir -p "$temp_paramspider_dir"
+
+    # Initialize aggregate file
+    true > "$output_file"
+
+    while IFS= read -r host; do
+        if [ -z "$host" ]; then continue; fi # Skip empty lines
+        log_message "INFO" "    Running ParamSpider on $host..."
+        local sanitized_host=$(echo "$host" | sed -E 's/https?:\/\///' | sed 's/[^a-zA-Z0-9]/_/g') # Sanitize hostname
+        local current_paramspider_output="$temp_paramspider_dir/${sanitized_host}_params.txt"
+
+        # paramspider takes --domain, not -l for a list of URLs directly.
+        # It then crawls that domain.
+        paramspider_cmd="paramspider --domain \"$(echo "$host" | sed -E 's/https?:\/\///')\" --output \"$current_paramspider_output\""
+        [ "$PROXY_ADDRESS" != "" ] && paramspider_cmd="$paramspider_cmd --proxy \"$PROXY_ADDRESS\""
+        # [ -n "$CUSTOM_HEADER" ] && paramspider_cmd="$paramspider_cmd --headers \"$CUSTOM_HEADER\"" # Custom header removed
+        
+        [ "$VERBOSE" -eq 1 ] && log_message "INFO" "      Executing: $paramspider_cmd"
+        eval "$paramspider_cmd"
+
+        if [ -s "$current_paramspider_output" ]; then
+            cat "$current_paramspider_output" >> "$output_file"
+            log_message "INFO" "      Found $(wc -l < "$current_paramspider_output") parameterized URLs for $host."
+        else
+            log_message "WARN" "      No parameterized URLs found by ParamSpider for $host or tool failed."
+        fi
+    done < "$input_file"
+
+    if [ ! -s "$output_file" ]; then
+        log_message "WARN" "ParamSpider completed, but no parameterized URLs were discovered."
+    fi
+    log_message "INFO" "  Total $(wc -l < "$output_file") parameterized URLs discovered by ParamSpider."
+
+    # Cleanup temporary paramspider directory
+    log_message "INFO" "  Cleaning up temporary ParamSpider files..."
+    rm -rf "$temp_paramspider_dir"
 }
 
 run_ffuf_bruteforce() {
@@ -248,7 +295,7 @@ run_ffuf_bruteforce() {
         local ffuf_paths_cmd="ffuf -u \"$host/FUZZ\" -w \"$WORDLIST_COMMON_PATHS\" -of csv -o \"$output_dir/${sanitized_host}_paths.csv\" \
          -t \"$FFUF_THREADS\" -rate \"$FFUF_RATE\" -c -sf -sa -delay \"$current_ffuf_delay_ms\""
         [ "$PROXY_ADDRESS" != "" ] && ffuf_paths_cmd="$ffuf_paths_cmd -x \"$PROXY_ADDRESS\""
-        [ -n "$CUSTOM_HEADER" ] && ffuf_paths_cmd="$ffuf_paths_cmd -H \"$CUSTOM_HEADER\"" # Add custom header
+        # [ -n "$CUSTOM_HEADER" ] && ffuf_paths_cmd="$ffuf_paths_cmd -H \"$CUSTOM_HEADER\"" # Custom header removed
         [ "$VERBOSE" -eq 1 ] && log_message "INFO" "      Executing (paths): $ffuf_paths_cmd"
         eval "$ffuf_paths_cmd" & # Run in background
 
@@ -256,7 +303,7 @@ run_ffuf_bruteforce() {
         local ffuf_files_cmd="ffuf -u \"$host/FUZZ\" -w \"$WORDLIST_COMMON_FILES\" -of csv -o \"$output_dir/${sanitized_host}_files.csv\" \
          -t \"$FFUF_THREADS\" -rate \"$FFUF_RATE\" -c -sf -sa -delay \"$current_ffuf_delay_ms\""
         [ "$PROXY_ADDRESS" != "" ] && ffuf_files_cmd="$ffuf_files_cmd -x \"$PROXY_ADDRESS\""
-        [ -n "$CUSTOM_HEADER" ] && ffuf_files_cmd="$ffuf_files_cmd -H \"$CUSTOM_HEADER\"" # Add custom header
+        # [ -n "$CUSTOM_HEADER" ] && ffuf_files_cmd="$ffuf_files_cmd -H \"$CUSTOM_HEADER\"" # Custom header removed
         [ "$VERBOSE" -eq 1 ] && log_message "INFO" "      Executing (files): $ffuf_files_cmd"
         eval "$ffuf_files_cmd" & # Run in background
     done < "$input_file"
@@ -278,13 +325,13 @@ run_nuclei_scan() {
     nuclei_cmd="nuclei -l \"$input_file\" -t vulnerabilities/ -t exposures/ -t misconfiguration/ -t default-logins/ -t cve/ \
                 -c \"$NUCLEI_CONCURRENCY\" -rl \"$NUCLEI_RATE\" -d \"$random_delay_s\" -silent -json -o \"$output_file\""
     [ "$PROXY_ADDRESS" != "" ] && nuclei_cmd="$nuclei_cmd -proxy \"$PROXY_ADDRESS\""
-    [ -n "$CUSTOM_HEADER" ] && nuclei_cmd="$nuclei_cmd -H \"$CUSTOM_HEADER\"" # Add custom header
+    # [ -n "$CUSTOM_HEADER" ] && nuclei_cmd="$nuclei_cmd -H \"$CUSTOM_HEADER\"" # Custom header removed
     
     [ "$VERBOSE" -eq 1 ] && log_message "INFO" "  Executing: $nuclei_cmd"
     eval "$nuclei_cmd"
 
     if [ $? -ne 0 ]; then
-        log_message "WARN" "Nuclei scan encountered issues. Results might be incomplete."
+        log_message "WARN" "Nuclei scan encountered issues. Results might be incomplete. Please check '$LOG_FILE' for details and consider updating Nuclei/templates."
     fi
     log_message "INFO" "  Nuclei scan results saved to $output_file"
 }
@@ -300,7 +347,7 @@ run_dalfox_scan() {
     # Using 'grep -E' for basic parameter detection to focus dalfox on relevant URLs
     dalfox_cmd="cat \"$input_file\" | grep -E '\?|=' | dalfox url --skip-grepping -w \"$DALFOX_THREADS\" -d \"$random_delay_s\" -o \"$output_file\""
     [ "$PROXY_ADDRESS" != "" ] && dalfox_cmd="$dalfox_cmd -x \"$PROXY_ADDRESS\"" # DalFox uses -x for proxy
-    [ -n "$CUSTOM_HEADER" ] && dalfox_cmd="$dalfox_cmd -H \"$CUSTOM_HEADER\"" # Add custom header
+    # [ -n "$CUSTOM_HEADER" ] && dalfox_cmd="$dalfox_cmd -H \"$CUSTOM_HEADER\"" # Custom header removed
     
     [ "$VERBOSE" -eq 1 ] && log_message "INFO" "  Executing: $dalfox_cmd"
     eval "$dalfox_cmd"
@@ -391,6 +438,7 @@ check_tool "httpx"
 check_tool "gau"
 check_tool "waybackurls"
 check_tool "katana"
+check_tool "paramspider" # New tool check
 check_tool "ffuf"
 check_tool "nuclei"
 check_tool "dalfox"
@@ -406,6 +454,7 @@ LIVE_HOSTS_DEDUP_FILE="$REPORTS_DIR/live_hosts_deduplicated.txt"
 GAU_URLS_RAW_FILE="$REPORTS_DIR/gau_urls_raw.txt"
 WAYBACKURLS_URLS_RAW_FILE="$REPORTS_DIR/waybackurls_urls_raw.txt" # New output file for waybackurls
 KATANA_URLS_RAW_FILE="$REPORTS_DIR/katana_urls_raw.txt"
+PARAMSPIDER_AGGREGATE_FILE="$REPORTS_DIR/paramspider_urls_raw.txt" # New output file for paramspider
 ALL_URLS_DEDUP_FILE="$REPORTS_DIR/all_urls_deduplicated.txt"
 FFUF_RESULTS_DIR="$REPORTS_DIR/ffuf_raw_results"
 NUCLEI_RESULTS_FILE="$REPORTS_DIR/nuclei_results.json"
@@ -443,22 +492,26 @@ echo ""
 run_katana_discovery "$LIVE_HOSTS_DEDUP_FILE" "$KATANA_URLS_RAW_FILE"
 echo ""
 
-# Step 6: Consolidate & Deduplicate All URLs for further scanning
-log_message "INFO" "Consolidating and deduplicating all collected URLs (Gau + Waybackurls + Katana + Live Hosts)..."
-cat "$GAU_URLS_RAW_FILE" "$WAYBACKURLS_URLS_RAW_FILE" "$KATANA_URLS_RAW_FILE" "$LIVE_HOSTS_DEDUP_FILE" | sort -u > "$ALL_URLS_DEDUP_FILE"
+# Step 6: Parameter Discovery (ParamSpider)
+run_paramspider_discovery "$LIVE_HOSTS_DEDUP_FILE" "$PARAMSPIDER_AGGREGATE_FILE"
+echo ""
+
+# Step 7: Consolidate & Deduplicate All URLs for further scanning
+log_message "INFO" "Consolidating and deduplicating all collected URLs (Gau + Waybackurls + Katana + ParamSpider + Live Hosts)..."
+cat "$GAU_URLS_RAW_FILE" "$WAYBACKURLS_URLS_RAW_FILE" "$KATANA_URLS_RAW_FILE" "$PARAMSPIDER_AGGREGATE_FILE" "$LIVE_HOSTS_DEDUP_FILE" | sort -u > "$ALL_URLS_DEDUP_FILE"
 log_message "INFO" "  Total $(wc -l < "$ALL_URLS_DEDUP_FILE") unique URLs for further scanning."
 echo ""
 
-# Step 7: Directory and File Brute-Forcing
+# Step 8: Directory and File Brute-Forcing
 run_ffuf_bruteforce "$LIVE_HOSTS_DEDUP_FILE" "$FFUF_RESULTS_DIR"
 echo ""
 
-# Step 8: Initial Vulnerability Scan with Nuclei
+# Step 9: Initial Vulnerability Scan with Nuclei
 # Nuclei can take a list of URLs, so we feed it all unique URLs found
 run_nuclei_scan "$ALL_URLS_DEDUP_FILE" "$NUCLEI_RESULTS_FILE"
 echo ""
 
-# Step 9: XSS Scan with DalFox
+# Step 10: XSS Scan with DalFox
 # DalFox can take a list of URLs, filtering for params helps focus
 run_dalfox_scan "$ALL_URLS_DEDUP_FILE" "$DALFOX_RESULTS_FILE"
 echo ""
@@ -466,7 +519,7 @@ echo ""
 # --- Cleanup ---
 if [ "$SKIP_CLEANUP" -eq 0 ]; then
     log_message "INFO" "Cleaning up raw intermediate files..."
-    rm -f "$GAU_URLS_RAW_FILE" "$WAYBACKURLS_URLS_RAW_FILE" "$KATANA_URLS_RAW_FILE"
+    rm -f "$GAU_URLS_RAW_FILE" "$WAYBACKURLS_URLS_RAW_FILE" "$KATANA_URLS_RAW_FILE" "$PARAMSPIDER_AGGREGATE_FILE" # Include paramspider raw file
     log_message "INFO" "Cleanup complete."
 fi
 
